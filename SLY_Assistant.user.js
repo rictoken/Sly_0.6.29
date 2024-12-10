@@ -1190,7 +1190,7 @@
 					cLog(3,`${FleetTimeStamp(fleetName)} <${opName}> Polling transaction until successful`);
 					while (!txResult) {
 						tryCount++;
-						if(tryCount >= 100) {
+						if(tryCount >= 130) {
 							// couldn't find the transaction, it is possible a block re-org happened, so try to send the tx again
 							cLog(1,`${FleetTimeStamp(fleetName)} <${opName}> No transaction found after ${tryCount} tries, possible block re-org, resending the tx`);
 							break;
@@ -1199,7 +1199,7 @@
 						txResult = await solanaReadConnection.getTransaction(txHash, {commitment: 'confirmed', preflightCommitment: 'confirmed', maxSupportedTransactionVersion: 1});
 						if(!txResult) await wait(1000);
 					}
-					if(tryCount >= 100) {
+					if(tryCount >= 130) {
 						continue;
 					}
 				}
@@ -2569,7 +2569,7 @@
             let txResult = await txSignAndSend(transactions, userCraft, 'COMPLETING CRAFT', 100);
 
             // Allow RPC to catch up (to be sure the crew is available before starting the next job)
-            await wait(3000);
+            await wait(4000);
 
             resolve(txResult);
         });
@@ -3231,6 +3231,25 @@
         targetElem.appendChild(craftRow);
     }
 
+	async function resetFleetState(fleet) {
+		if (fleet.state.includes('ERROR') && !fleet.state.includes('⌛')) {
+			let userFleetIndex = userFleets.findIndex(item => {return item.publicKey == fleet.publicKey});
+			cLog(1,`${FleetTimeStamp(fleet.label)} Manual request for resetting the fleet state`);
+			updateFleetState(fleet,'ERROR: Trying to restart ...',true); // keep string "ERROR" for now to prevent an early start of operateFleet()
+				
+			let fleetAcctInfo = await getAccountInfo(fleet.label, 'full fleet info', fleet.publicKey);
+			let [fleetState, extra] = getFleetState(fleetAcctInfo);
+			let fleetCoords = fleetState == 'Idle' && extra ? extra : [];
+				
+			//now we have all necessary info, let's do the reset
+			fleet.startingCoords = fleetCoords;
+			fleet.iterCnt=0;
+			fleet.resupplying=false;
+			updateFleetState(fleet, fleetState, true);
+		}
+	}
+
+
 	function updateAssistStatus(fleet) {
         let rowPK = fleet.publicKey ? fleet.publicKey.toString() : fleet.label;
 		let targetRow = document.querySelectorAll('#assistStatus .assist-fleet-row[pk="' + rowPK + '"]');
@@ -3255,6 +3274,7 @@
 			fleetStatus.innerHTML = fleet.state;
 			let fleetStatusTd = document.createElement('td');
 			if(fleet.publicKey) {
+				fleetStatusTd.addEventListener('click', async() => { await resetFleetState(fleet); });
 				let fleetTool = document.createElement('span');
 				fleetTool.innerHTML = fleet.foodCnt || 0;
 				let fleetToolTd = document.createElement('td');
@@ -3313,8 +3333,8 @@
 		}
 	}
 
-	function updateFleetState(fleet, newState) {
-        if (!fleet.state.includes('ERROR')) {
+	function updateFleetState(fleet, newState, overrideError) {
+        if (!fleet.state.includes('ERROR') || overrideError) {
             fleet.state = newState;
             updateAssistStatus(fleet);
         }
@@ -3402,11 +3422,14 @@
 		let errBool = false;
 
 		for (let [i, row] of fleetRows.entries()) {
-			const inputError = (msg, innerHtml) => {
+			
+			const inputError = (msg, innerHtml, type) => {
+				// type 1: Distance exceeds fuel capacity
+				// type 2: Identical starbase/target sectors				
 				cLog(1, msg);
 				row.children[2].firstChild.style.border = '2px solid red';
 				row.children[3].firstChild.style.border = '2px solid red';
-				row.children[7].firstChild.style.border = '2px solid red';
+				if(type==1) row.children[7].firstChild.style.border = '2px solid red';
 				errElem[0].innerHTML = innerHtml;
 				errBool = true;
 				rowErrBool = true;
@@ -3431,11 +3454,15 @@
 				if (warpCost > userFleets[userFleetIndex].fuelCapacity) {
 					let subwarpCost = calculateSubwarpFuelBurn(userFleets[userFleetIndex], calculateMovementDistance(starbaseCoords, destCoords));
 					if (subwarpCost * 2 > userFleets[userFleetIndex].fuelCapacity) {
-						inputError('ERROR: Fleet will not have enough fuel to return to starbase', 'ERROR: Distance exceeds fuel capacity')
+						inputError('ERROR: Fleet will not have enough fuel to return to starbase', 'ERROR: Distance exceeds fuel capacity', 1);
 					} else {
 						moveType = 'subwarp';
 					}
 				}
+			}
+
+			if(fleetAssignment === 'Transport' && starbaseCoords[0]==destCoords[0] && starbaseCoords[1]==destCoords[1]) {
+				inputError('ERROR: Starbase and target sectors are identical.', 'ERROR: Identical starbase/target sectors', 2);
 			}
 
 			let scanMin = parseInt(scanRows[i].children[1].children[0].children[1].value) || 0;
@@ -4201,7 +4228,7 @@
 	}
 
 	async function handleResupply(i, fleetCoords) {
-		const errorWaitTime = 10 * 60 * 1000;
+		const errorWaitTime = 5 * 60 * 1000;
 		const errorFuelRatio = 0.75;
 
 		async function unloadSDU() {
@@ -4258,6 +4285,10 @@
 				//Wait a while before trying again
 				await wait(errorWaitTime);
 				await loadFood();
+			} else {
+				if(userFleets[i].state.includes('ERROR: No food ⌛')) {
+					updateFleetState(userFleets[i], `Enough food loaded`, true);
+				}
 			}
 		}
 
@@ -4292,6 +4323,10 @@
 				//Wait a while before trying again
 				await wait(errorWaitTime);
 				await loadFuel();
+			} else {
+				if(userFleets[i].state.includes('ERROR: No Fuel ⌛')) {
+					updateFleetState(userFleets[i], `Enough fuel loaded`, true);
+				}
 			}
 		}
 
